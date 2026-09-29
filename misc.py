@@ -9,13 +9,17 @@ SRC_DIR = "research_data/ldap-sequel/processing"
 DB_PATH = "research_data/ldap-sequel/ldap.duckdb"
 
 
-def base_arg_parser(description: str) -> argparse.ArgumentParser:
-    """Argument parser with the options every ingest script shares."""
+def base_arg_parser(description: str, src_default: str = SRC_DIR, csv: bool = True) -> argparse.ArgumentParser:
+    """Argument parser with the options every ingest script shares.
+
+    csv=True adds the CSV-only options (--all-varchar, --ignore-errors).
+    """
     parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--src", default=SRC_DIR, help="Directory containing the CSV files")
+    parser.add_argument("--src", default=src_default, help="Directory containing the input files")
     parser.add_argument("--db", default=DB_PATH, help="DuckDB database file")
-    parser.add_argument("--all-varchar", action="store_true", help="Read every column as text")
-    parser.add_argument("--ignore-errors", action="store_true", help="Skip malformed rows instead of failing")
+    if csv:
+        parser.add_argument("--all-varchar", action="store_true", help="Read every column as text")
+        parser.add_argument("--ignore-errors", action="store_true", help="Skip malformed rows instead of failing")
     return parser
 
 
@@ -57,15 +61,47 @@ def print_file_size(path: Path) -> None:
     print(f"  {path.name}  ({path.stat().st_size / 1e9:.2f} GB)")
 
 
+def total_size_gb(paths: list[Path]) -> float:
+    return sum(p.stat().st_size for p in paths) / 1e9
+
+
 def print_schema(con: duckdb.DuckDBPyConnection, table: str) -> None:
     """Print total row count and column types of a table."""
     total = con.execute(f"SELECT count(*) FROM {table}").fetchone()
-    if total is not None:
-        total  = total[0]
+    if total is None:
+        print(f"Cannot print totals. Is the ingest file ok?")
+    else:
+        total = total[0]
         print(f"Total rows in {table}: {total:,}")
         print("Schema:")
-    else:
-        print(f"Cannot print totals. Is the ingested file correct?")
-
     for name, dtype, *_ in con.execute(f"DESCRIBE {table}").fetchall():
         print(f"  {name:<40} {dtype}")
+
+
+# --- Hive-style path helpers (.../port=<P>/.../year=<Y>/month=<M>/day=<D>/...) ---------------
+
+GOSCANNER_RAW_DIR = "research_data/ldap-sequel/catrin/measurements/tool=goscanner/format=raw"
+HIVE_PORT_REGEX = r"port=(\d+)/"
+HIVE_DATE_REGEX = r"year=(\d{4})/month=(\d{1,2})/day=(\d{1,2})"
+
+
+def hive_path_columns_sql(filename_col: str = "filename") -> str:
+    """SQL select-list items deriving `port` and `scan_date` from a file path column.
+
+    Use with read_csv/read_parquet(..., filename = true, hive_partitioning = false).
+    Backslashes are normalised so the regexes also match Windows paths.
+    """
+    path = f"replace({filename_col}, '\\', '/')"
+
+    def date_part(i: int) -> str:
+        return f"regexp_extract({path}, '{HIVE_DATE_REGEX}', {i})::INTEGER"
+
+    return (
+        f"regexp_extract({path}, '{HIVE_PORT_REGEX}', 1)::INTEGER AS port,\n"
+        f"            make_date({date_part(1)}, {date_part(2)}, {date_part(3)}) AS scan_date"
+    )
+
+
+def find_files(src_dir: Path, pattern: str) -> list[Path]:
+    """Sorted regular files under src_dir matching a glob pattern."""
+    return sorted(p for p in src_dir.glob(pattern) if p.is_file())
