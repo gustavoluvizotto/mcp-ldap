@@ -1,3 +1,4 @@
 /research_data
 /.venv
 /.vscode
+/__pycache__
