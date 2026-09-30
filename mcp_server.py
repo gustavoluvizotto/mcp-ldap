@@ -18,8 +18,9 @@ Usage:
     python mcp_server.py --show-token            # print the token (to set up the client)
     python mcp_server.py --rotate-token          # replace the token
 
-The token is created on first run and kept in .mcp_token (git-ignored). It can
-also be supplied with the LDAP_MCP_TOKEN environment variable.
+The token is created on first run and kept in .mcp_token (git-ignored), or in the
+file named by LDAP_MCP_TOKEN_FILE. It can also be supplied with the LDAP_MCP_TOKEN
+environment variable.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ from mcp.types import ToolAnnotations
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_DB = HERE / "research_data/ldap-sequel/ldap.duckdb"
-TOKEN_FILE = HERE / ".mcp_token"
+TOKEN_FILE = Path(os.environ.get("LDAP_MCP_TOKEN_FILE") or HERE / ".mcp_token")
 DEFAULT_PORT = 8765
 
 MAX_ROWS_CAP = 5000          # hard ceiling on rows returned by one query
@@ -304,6 +305,7 @@ def load_token(rotate: bool) -> str:
     if TOKEN_FILE.exists() and not rotate:
         return TOKEN_FILE.read_text().strip()
     token = secrets.token_urlsafe(32)
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
     TOKEN_FILE.write_text(token + "\n")
     TOKEN_FILE.chmod(0o600)
     print(f"New access token written to {TOKEN_FILE}")
@@ -320,6 +322,10 @@ def main() -> None:
     p.add_argument("--port", type=int, default=int(os.environ.get("LDAP_MCP_PORT", DEFAULT_PORT)))
     p.add_argument("--allow", action="append", metavar="CIDR",
                    help="Allowed client network, repeatable (default: the /24 of the LAN IP)")
+    p.add_argument("--public-host", action="append", metavar="HOST",
+                   default=[h for h in os.environ.get("LDAP_MCP_PUBLIC_HOST", "").replace(",", " ").split() if h],
+                   help="Extra address/hostname clients use to reach the server, e.g. the host's LAN IP "
+                        "when running in Docker (repeatable; env LDAP_MCP_PUBLIC_HOST, comma-separated)")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S, help="Per-query timeout in seconds")
     p.add_argument("--memory-limit", default=None, help="DuckDB memory_limit, e.g. 4GB")
     p.add_argument("--show-token", action="store_true", help="Print the access token and exit")
@@ -357,7 +363,7 @@ def main() -> None:
 
     mcp = build_server(db)
     allowed_hosts = [f"{h}:*" for h in {host, lan_ip, "127.0.0.1", "localhost", socket.gethostname(),
-                                        socket.gethostname().split(".")[0] + ".local"} if h]
+                                        socket.gethostname().split(".")[0] + ".local", *args.public_host} if h]
     app = mcp.streamable_http_app(
         stateless_http=True,
         json_response=True,
@@ -370,7 +376,7 @@ def main() -> None:
     )
     guarded = LanGuard(app, networks, token)
 
-    shown = lan_ip if host in ("0.0.0.0", "::") else host
+    shown = args.public_host[0] if args.public_host else (lan_ip if host in ("0.0.0.0", "::") else host)
     print("\nldap-duckdb MCP server")
     print(f"  database : {db.path}")
     print(f"  endpoint : http://{shown}:{args.port}/mcp")

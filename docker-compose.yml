@@ -1,0 +1,54 @@
+# Runs all ingest_*.py scripts, then the ldap-duckdb MCP server.
+#
+#   cp .env.example .env    # set LAN_IP to this laptop's Wi-Fi IP
+#   docker compose up -d --build
+#   docker compose logs -f  # ingest progress + server banner
+#   cat secrets/.mcp_token
+
+services:
+  ldap-mcp:
+    build: .
+    image: ldap-mcp:latest
+    container_name: ldap-mcp
+    restart: unless-stopped
+    # Run as your own user so files it writes (DB, token) belong to you.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    ports:
+      # Published only on the LAN IP, never on 0.0.0.0
+      - "${LAN_IP:?set LAN_IP in .env}:${MCP_PORT:-8765}:8765"
+    environment:
+      LDAP_MCP_HOST: 0.0.0.0              # inside the container; exposure is limited by `ports` above
+      LDAP_MCP_PORT: 8765
+      LDAP_MCP_PUBLIC_HOST: ${LAN_IP}     # Host header clients send (DNS-rebinding check)
+      LDAP_MCP_TOKEN_FILE: /secrets/.mcp_token
+    volumes:
+      - ./research_data:/app/research_data   # input files + ldap.duckdb (ingest writes here)
+      - ${TOKEN_DIR:-./secrets}:/secrets     # .mcp_token lands here
+    networks:
+      - ldapnet
+    # Ingests run one at a time (DuckDB allows a single writer), tcp_hosts first
+    # because the other goscanner tables join on it. A failing ingest is logged
+    # and skipped; replace `;` with `&&` to stop on the first failure instead.
+    #
+    # LAN clients reach the container through Docker's NAT, so they appear with
+    # the Docker network's gateway address; hence --allow is the Docker subnet.
+    # The bearer token is the real gate.
+    command:
+      - sh
+      - -c
+      - |
+        python ingest_goscanner_tcp_hosts.py ;
+        python ingest_goscanner_ldap.py ;
+        python ingest_goscanner_starttls_ldap.py ;
+        python ingest_goscanner_ldap_root_dse.py ;
+        python ingest_goscanner_certs.py ;
+        python ingest_goscanner_netstats.py ;
+        python ingest_cert_validator.py ;
+        python ingest_rootdse_fps.py ;
+        exec python mcp_server.py --allow ${ALLOW_CIDR:-172.28.0.0/24}
+
+networks:
+  ldapnet:
+    ipam:
+      config:
+        - subnet: ${DOCKER_SUBNET:-172.28.0.0/24}

@@ -125,6 +125,31 @@ Fully quit and reopen Claude Desktop. `ldap-duckdb` should appear under the tool
 | `401` | Token mismatch; re-copy from `--show-token` |
 | "database is locked" | An ingest script is writing; wait for it to finish |
 
+---
+
+## Running with Docker Compose
+
+Files: `Dockerfile` (Python environment only), `docker-compose.yml`, `.env.example`, `.dockerignore`.
+The service's `command:` in `docker-compose.yml` runs each `ingest_*.py` one after another
+(`ingest_goscanner_tcp_hosts.py` first), then `exec`s `mcp_server.py`.
+
+```bash
+cp .env.example .env          # set LAN_IP (ipconfig getifaddr en0), HOST_UID/HOST_GID (id -u / id -g)
+docker compose up -d --build
+docker compose logs -f        # ingest progress + server banner
+cat secrets/.mcp_token        # token (dir set by TOKEN_DIR)
+```
+
+- `./research_data` is mounted at `/app/research_data` (inputs + `ldap.duckdb`).
+- Token goes to `TOKEN_DIR` (default `./secrets`) via `LDAP_MCP_TOKEN_FILE=/secrets/.mcp_token`.
+- A failing ingest is logged and skipped (`;` between commands); use `&&` to stop on the first failure.
+- To start without ingesting: `docker compose run -d --service-ports ldap-mcp python mcp_server.py --allow 172.28.0.0/24`.
+- Port is published only on `LAN_IP`. LAN clients arrive via Docker NAT with the network gateway's IP, so `ALLOW_CIDR` is the Docker subnet (`172.28.0.0/24`); the bearer token is the real gate.
+- `LDAP_MCP_PUBLIC_HOST=${LAN_IP}` adds the LAN IP to the allowed Host headers (else 421).
+- A `403 ... only local-network clients` in the logs shows the source IP Docker used; set `ALLOW_CIDR` to cover it.
+
+Server changes: `LDAP_MCP_TOKEN_FILE` env var, and `--public-host` / `LDAP_MCP_PUBLIC_HOST`.
+
 # Testing
 
 > _Human generated text._
